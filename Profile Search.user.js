@@ -1,13 +1,3 @@
-// ==UserScript==
-// @name         Custom Search Bar for ИТД
-// @namespace    http://tampermonkey.net/
-// @version      0.16
-// @description  Adds a transparent search bar with rounded edges and a blue circular button before the profile-tabs element, centered and nearly full width of the profile-card parent. The search function scrapes all posts from the profile, filters them, and shows/hides posts on the page based on data-post-id.
-// @author       Dmitry (#дым)
-// @match        https://*.xn--d1ah4a.com/*
-// @grant        none
-// ==/UserScript==
-
 (function() {
     'use strict';
 
@@ -239,4 +229,5 @@
         childList: true,
         subtree: true
     });
+
 })();
