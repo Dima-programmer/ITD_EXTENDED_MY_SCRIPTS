@@ -1,0 +1,242 @@
+// ==UserScript==
+// @name         Custom Search Bar for ИТД
+// @namespace    http://tampermonkey.net/
+// @version      0.16
+// @description  Adds a transparent search bar with rounded edges and a blue circular button before the profile-tabs element, centered and nearly full width of the profile-card parent. The search function scrapes all posts from the profile, filters them, and shows/hides posts on the page based on data-post-id.
+// @author       Dmitry (#дым)
+// @match        https://*.xn--d1ah4a.com/*
+// @grant        none
+// ==/UserScript==
+
+(function() {
+    'use strict';
+
+    async function scrapePosts(searchQuery) {
+        // Получаем USERNAME из текущей ссылки (например, сайт.com/USERNAME)
+        const pathname = window.location.pathname;
+        const USERNAME = pathname.split('/')[1]; // Предполагаем, что URL выглядит как /USERNAME
+
+        if (!USERNAME) {
+            console.error('Не удалось получить USERNAME из URL');
+            return;
+        }
+
+        const CONFIG = {
+            limit: 50,
+            maxEmpty: 3
+        };
+
+        async function getNewToken() {
+            const url = 'https://xn--d1ah4a.com/api/v1/auth/refresh';
+            const options = { method: 'POST' };
+            try {
+                const res = await fetch(url, options);
+                const data = await res.json();
+                return data.accessToken || data.token;
+            } catch (e) {
+                console.error('Ошибка при получении токена:', e);
+                return null;
+            }
+        }
+
+        let token = await getNewToken();
+        if (!token) {
+            console.error('Не удалось получить токен');
+            return;
+        }
+
+        let allPosts = new Map();
+        let isRunning = true;
+        let currentDate = new Date(); // Начинаем с сегодняшней даты
+        let emptyHits = 0;
+
+        // Однопоточный скрапинг
+        while (isRunning && emptyHits < CONFIG.maxEmpty) {
+            try {
+                const cursor = encodeURIComponent(currentDate.toISOString());
+                const url = `https://xn--d1ah4a.com/api/posts/user/${USERNAME}?limit=${CONFIG.limit}&cursor=${cursor}&sort=new`;
+                const options = { headers: { 'Authorization': `Bearer ${token}` } };
+                const res = await fetch(url, options);
+
+                if (res.status === 401) {
+                    token = await getNewToken();
+                    if (!token) break;
+                    continue;
+                }
+
+                const result = await res.json();
+                const posts = result.data?.posts || [];
+
+                if (posts.length > 0) {
+                    for (let i = 0; i < posts.length; i++) {
+                        allPosts.set(posts[i].id, posts[i]);
+                    }
+                    emptyHits = 0;
+                    // Двигаемся в сторону устаревания: вычитаем 1 день
+                    currentDate.setDate(currentDate.getDate() - 1);
+                } else {
+                    emptyHits++;
+                }
+
+                if (posts.length < CONFIG.limit) break;
+
+            } catch (e) {
+                console.error('Ошибка при скрапинге:', e);
+                emptyHits++;
+                await new Promise(r => setTimeout(r, 500));
+            }
+        }
+
+        isRunning = false;
+
+        const finalData = Array.from(allPosts.values());
+
+        // Фильтрация по запросу, если он не пустой
+        const query = searchQuery.trim().toLowerCase();
+        let filteredData = finalData;
+        if (query) {
+            filteredData = finalData.filter(post => {
+                const content = (post.content || post.text || '').toLowerCase();
+                return content.includes(query);
+            });
+        }
+
+        // Создаём Set с id отфильтрованных постов
+        const filteredIds = new Set(filteredData.map(post => post.id));
+
+        // Находим все div с классом post-container и фильтруем по data-post-id
+        const postContainers = document.querySelectorAll('[class*="post-container"]');
+        postContainers.forEach(container => {
+            const postId = container.getAttribute('data-post-id');
+            if (postId && filteredIds.has(postId)) {
+                container.style.display = ''; // Показать
+            } else {
+                container.style.display = 'none'; // Скрыть
+            }
+        });
+
+        // Находим блок post-list и добавляем/убираем надпись "посты не найдены"
+        const postList = document.querySelector('[class*="post-list"]');
+        if (postList) {
+            // Убираем существующую надпись, если есть
+            const existingMessage = postList.querySelector('.no-posts-message');
+            if (existingMessage) {
+                existingMessage.remove();
+            }
+
+            if (filteredData.length === 0) {
+                // Добавляем надпись "посты не найдены"
+                const noPostsMessage = document.createElement('div');
+                noPostsMessage.className = 'no-posts-message';
+                noPostsMessage.textContent = 'посты не найдены';
+                noPostsMessage.style.cssText = `
+                    text-align: center;
+                    padding: 20px;
+                    font-size: 18px;
+                    color: #666;
+                `;
+                postList.appendChild(noPostsMessage);
+            }
+        }
+
+        // Извлекаем id и content, сохраняем в формате id:content
+        const postsData = filteredData.map(post => `${post.id}:${post.content || post.text || 'Нет содержимого'}`);
+        console.log(`Отфильтрованные посты по запросу "${query}":`, postsData);
+    }
+
+    function addSearchBar() {
+        // Check if the search bar is already added to avoid duplicates
+        if (document.querySelector('.custom-search-container')) return;
+
+        // Find the profile-tabs element (using class contains in case of multiple classes)
+        const profileTabs = document.querySelector('[class*="profile-tabs"]');
+        if (!profileTabs) return; // Exit if not found
+
+        // Find the parent element with class profile-card (using closest for upward search)
+        const profileCard = profileTabs.closest('[class*="profile-card"]');
+        if (!profileCard) return; // Exit if not found
+
+        // Create the search bar container
+        const searchContainer = document.createElement('div');
+        searchContainer.className = 'custom-search-container'; // Add a class to prevent duplicates
+        searchContainer.style.cssText = `
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            width: 98%;
+            margin: 10px auto;
+            padding: 10px;
+            background: inherit; /* Inherit background from parent (site's background) */
+            border-radius: 25px; /* Strongly rounded edges */
+            box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+        `;
+
+        // Create the input field
+        const searchInput = document.createElement('input');
+        searchInput.type = 'text';
+        searchInput.placeholder = 'Search...';
+        searchInput.style.cssText = `
+            flex: 1;
+            padding: 10px;
+            border: none;
+            outline: none;
+            background: transparent; /* Transparent background */
+            font-size: 16px;
+            border-radius: 20px 0 0 20px; /* Rounded left side */
+        `;
+
+        // Create the search button
+        const searchButton = document.createElement('button');
+        searchButton.textContent = '🔍'; // Or use an icon, but keeping it simple
+        searchButton.style.cssText = `
+            width: 40px;
+            height: 40px;
+            border: none;
+            border-radius: 50%; /* Circular button */
+            background: blue;
+            color: white;
+            cursor: pointer;
+            margin-left: 5px;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            font-size: 16px;
+        `;
+
+        // Add event listeners to trigger the scrape and filter function
+        searchButton.addEventListener('click', async () => {
+            await scrapePosts(searchInput.value);
+        });
+
+        searchInput.addEventListener('keydown', async (e) => {
+            if (e.key === 'Enter') {
+                await scrapePosts(searchInput.value);
+            }
+        });
+
+        // Append input and button to container
+        searchContainer.appendChild(searchInput);
+        searchContainer.appendChild(searchButton);
+
+        // Insert the search container before the profile-tabs element
+        profileTabs.parentNode.insertBefore(searchContainer, profileTabs);
+    }
+
+    // Run on page load
+    window.addEventListener('load', addSearchBar);
+
+    // Also observe for dynamic content changes
+    const observer = new MutationObserver(function(mutations) {
+        mutations.forEach(function(mutation) {
+            if (mutation.type === 'childList') {
+                addSearchBar();
+            }
+        });
+    });
+
+    // Start observing the document body for changes
+    observer.observe(document.body, {
+        childList: true,
+        subtree: true
+    });
+})();
