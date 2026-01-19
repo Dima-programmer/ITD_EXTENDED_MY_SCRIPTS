@@ -2,6 +2,30 @@
     'use strict';
 
     async function scrapePosts(searchQuery) {
+        const query = searchQuery.trim().toLowerCase();
+
+        // If query is empty, show all posts immediately without scraping
+        if (query === '') {
+            const postContainers = document.querySelectorAll('[class*="post-container"]');
+            postContainers.forEach(container => {
+                container.style.display = ''; // Show all
+            });
+
+            const postList = document.querySelector('[class*="post-list"]');
+            if (postList) {
+                // Remove spinner or message
+                const existingSpinner = postList.querySelector('.search-spinner');
+                if (existingSpinner) {
+                    existingSpinner.remove();
+                }
+                const existingMessage = postList.querySelector('.no-posts-message');
+                if (existingMessage) {
+                    existingMessage.remove();
+                }
+            }
+            return;
+        }
+
         // Получаем USERNAME из текущей ссылки (например, сайт.com/USERNAME)
         const pathname = window.location.pathname;
         const USERNAME = pathname.split('/')[1]; // Предполагаем, что URL выглядит как /USERNAME
@@ -15,6 +39,39 @@
             limit: 50,
             maxEmpty: 3
         };
+
+        // Show spinner and hide posts at the start
+        const postContainers = document.querySelectorAll('[class*="post-container"]');
+        postContainers.forEach(container => {
+            container.style.display = 'none';
+        });
+
+        const postList = document.querySelector('[class*="post-list"]');
+        if (postList) {
+            // Remove existing message or spinner
+            const existingMessage = postList.querySelector('.no-posts-message');
+            if (existingMessage) {
+                existingMessage.remove();
+            }
+            const existingSpinner = postList.querySelector('.search-spinner');
+            if (existingSpinner) {
+                existingSpinner.remove();
+            }
+
+            // Add spinner
+            const spinner = document.createElement('div');
+            spinner.className = 'search-spinner';
+            spinner.innerHTML = '<svg class="loader__spinner svelte-lrcio1" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" width="24" height="24"><circle class="loader__track svelte-lrcio1" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="3"></circle><path class="loader__arc svelte-lrcio1" d="M12 2a10 10 0 0 1 10 10" stroke="currentColor" stroke-width="3" stroke-linecap="round"></path></svg>';
+            spinner.style.cssText = `
+                display: flex;
+                justify-content: center;
+                align-items: center;
+                padding: 20px;
+                color: #666;
+                animation: spin 1s linear infinite;
+            `;
+            postList.appendChild(spinner);
+        }
 
         async function getNewToken() {
             const url = 'https://xn--d1ah4a.com/api/v1/auth/refresh';
@@ -81,21 +138,16 @@
 
         const finalData = Array.from(allPosts.values());
 
-        // Фильтрация по запросу, если он не пустой
-        const query = searchQuery.trim().toLowerCase();
-        let filteredData = finalData;
-        if (query) {
-            filteredData = finalData.filter(post => {
-                const content = (post.content || post.text || '').toLowerCase();
-                return content.includes(query);
-            });
-        }
+        // Фильтрация по запросу
+        let filteredData = finalData.filter(post => {
+            const content = (post.content || post.text || '').toLowerCase();
+            return content.includes(query);
+        });
 
         // Создаём Set с id отфильтрованных постов
         const filteredIds = new Set(filteredData.map(post => post.id));
 
         // Находим все div с классом post-container и фильтруем по data-post-id
-        const postContainers = document.querySelectorAll('[class*="post-container"]');
         postContainers.forEach(container => {
             const postId = container.getAttribute('data-post-id');
             if (postId && filteredIds.has(postId)) {
@@ -105,9 +157,14 @@
             }
         });
 
-        // Находим блок post-list и добавляем/убираем надпись "посты не найдены"
-        const postList = document.querySelector('[class*="post-list"]');
+        // Находим блок post-list и добавляем/убираем надпись "посты не найдены" или spinner
         if (postList) {
+            // Убираем spinner
+            const existingSpinner = postList.querySelector('.search-spinner');
+            if (existingSpinner) {
+                existingSpinner.remove();
+            }
+
             // Убираем существующую надпись, если есть
             const existingMessage = postList.querySelector('.no-posts-message');
             if (existingMessage) {
@@ -134,7 +191,7 @@
         console.log(`Отфильтрованные посты по запросу "${query}":`, postsData);
     }
 
-    function addSearchBar() {
+    async function addSearchBar() {
         // Check if the search bar is already added to avoid duplicates
         if (document.querySelector('.custom-search-container')) return;
 
@@ -150,6 +207,7 @@
         const searchContainer = document.createElement('div');
         searchContainer.className = 'custom-search-container'; // Add a class to prevent duplicates
         searchContainer.style.cssText = `
+            position: relative;
             display: flex;
             justify-content: center;
             align-items: center;
@@ -167,50 +225,94 @@
         searchInput.placeholder = 'Search...';
         searchInput.style.cssText = `
             flex: 1;
-            padding: 10px;
+            padding: 10px 50px 10px 40px; /* Left padding for icon, right for clear button */
             border: none;
             outline: none;
             background: transparent; /* Transparent background */
             font-size: 16px;
-            border-radius: 20px 0 0 20px; /* Rounded left side */
+            border-radius: 20px; /* Rounded edges */
         `;
 
-        // Create the search button
-        const searchButton = document.createElement('button');
-        searchButton.textContent = '🔍'; // Or use an icon, but keeping it simple
-        searchButton.style.cssText = `
-            width: 40px;
-            height: 40px;
+        // Create the search icon (larger and positioned at the start, slightly lowered)
+        const searchIcon = document.createElement('div');
+        searchIcon.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" width="24" height="24"><path stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="m19.5 19.5-3-3M11 4.5a6.5 6.5 0 1 1 0 13 6.5 6.5 0 0 1 0-13Z"></path></svg>';
+        searchIcon.style.cssText = `
+            position: absolute;
+            left: 10px; /* Position at the start inside the input */
+            top: 50%;
+            transform: translateY(-40%); /* Slightly lowered */
+            pointer-events: none;
+            color: #666; /* Icon color */
+        `;
+
+        // Create the clear button (circular, transparent background, at the end, slightly moved left)
+        const clearButton = document.createElement('button');
+        clearButton.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" height="24px" viewBox="0 -960 960 960" width="24px" fill="#1f1f1f"><path d="m456-320 104-104 104 104 56-56-104-104 104-104-56-56-104 104-104-104-56 56 104 104-104 104 56 56Zm-96 160q-19 0-36-8.5T296-192L80-480l216-288q11-15 28-23.5t36-8.5h440q33 0 56.5 23.5T880-720v480q0 33-23.5 56.5T800-160H360ZM180-480l180 240h440v-480H360L180-480Zm400 0Z"/></svg>';
+        clearButton.style.cssText = `
+            position: absolute;
+            right: 15px; /* Slightly moved left */
+            top: 50%;
+            transform: translateY(-50%);
+            width: 30px;
+            height: 30px;
             border: none;
-            border-radius: 50%; /* Circular button */
-            background: blue;
-            color: white;
+            border-radius: 50%; /* Circular */
+            background: inherit; /* Transparent background */
             cursor: pointer;
-            margin-left: 5px;
             display: flex;
             justify-content: center;
             align-items: center;
-            font-size: 16px;
+            color: #666;
         `;
-
-        // Add event listeners to trigger the scrape and filter function
-        searchButton.addEventListener('click', async () => {
-            await scrapePosts(searchInput.value);
+        clearButton.addEventListener('click', () => {
+            searchInput.value = '';
+            searchInput.focus(); // Focus the input after clearing
+            searchInput.dispatchEvent(new Event('input')); // Trigger the input event to perform search
         });
 
+        // Debounce timer for automatic search
+        let debounceTimer;
+
+        // Add event listener for automatic search on input change with debounce
+        searchInput.addEventListener('input', () => {
+            clearTimeout(debounceTimer);
+            debounceTimer = setTimeout(async () => {
+                await scrapePosts(searchInput.value);
+            }, 300); // 300ms debounce
+        });
+
+        // Optional: Keep Enter key for immediate search
         searchInput.addEventListener('keydown', async (e) => {
             if (e.key === 'Enter') {
+                clearTimeout(debounceTimer);
                 await scrapePosts(searchInput.value);
             }
         });
 
-        // Append input and button to container
+        // Append input, icon, and clear button to container
         searchContainer.appendChild(searchInput);
-        searchContainer.appendChild(searchButton);
+        searchContainer.appendChild(searchIcon);
+        searchContainer.appendChild(clearButton);
 
         // Insert the search container before the profile-tabs element
         profileTabs.parentNode.insertBefore(searchContainer, profileTabs);
+
+        // Initial search to show all posts
+        await scrapePosts('');
     }
+
+    // Add CSS for spinner animation
+    const style = document.createElement('style');
+    style.textContent = `
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        .search-spinner svg {
+            animation: spin 1s linear infinite;
+        }
+    `;
+    document.head.appendChild(style);
 
     // Run on page load
     window.addEventListener('load', addSearchBar);
