@@ -1,7 +1,22 @@
 (function() {
     'use strict';
 
+    let currentSearch = null; // To track the current search process
+    let hideNewPostsObserver = null; // Observer to hide new posts during search
+    let postsCache = new Map(); // Global cache for posts to avoid re-scraping
+    let cacheLoaded = false; // Flag to check if cache is loaded
+
     async function scrapePosts(searchQuery) {
+        // Cancel any ongoing search
+        if (currentSearch) {
+            currentSearch.cancelled = true;
+            if (hideNewPostsObserver) {
+                hideNewPostsObserver.disconnect();
+                hideNewPostsObserver = null;
+            }
+        }
+        currentSearch = { cancelled: false };
+
         const query = searchQuery.trim().toLowerCase();
 
         // If query is empty, show all posts immediately without scraping
@@ -23,6 +38,7 @@
                     existingMessage.remove();
                 }
             }
+            currentSearch = null;
             return;
         }
 
@@ -73,6 +89,28 @@
             postList.appendChild(spinner);
         }
 
+        // Start observing for new posts and hide them
+        hideNewPostsObserver = new MutationObserver(function(mutations) {
+            mutations.forEach(function(mutation) {
+                if (mutation.type === 'childList') {
+                    mutation.addedNodes.forEach(function(node) {
+                        if (node.nodeType === Node.ELEMENT_NODE && node.matches && node.matches('[class*="post-container"]')) {
+                            node.style.display = 'none';
+                        }
+                        // Also check descendants
+                        const newPosts = node.querySelectorAll ? node.querySelectorAll('[class*="post-container"]') : [];
+                        newPosts.forEach(container => {
+                            container.style.display = 'none';
+                        });
+                    });
+                }
+            });
+        });
+        hideNewPostsObserver.observe(document.body, {
+            childList: true,
+            subtree: true
+        });
+
         async function getNewToken() {
             const url = 'https://xn--d1ah4a.com/api/v1/auth/refresh';
             const options = { method: 'POST' };
@@ -92,53 +130,67 @@
             return;
         }
 
-        let allPosts = new Map();
-        let isRunning = true;
-        let currentDate = new Date(); // Начинаем с сегодняшней даты
-        let emptyHits = 0;
+        // Use cache if available, else scrape
+        let allPosts = new Map(postsCache);
+        if (!cacheLoaded) {
+            let isRunning = true;
+            let currentDate = new Date(); // Начинаем с сегодняшней даты
+            let emptyHits = 0;
 
-        // Однопоточный скрапинг
-        while (isRunning && emptyHits < CONFIG.maxEmpty) {
-            try {
-                const cursor = encodeURIComponent(currentDate.toISOString());
-                const url = `https://xn--d1ah4a.com/api/posts/user/${USERNAME}?limit=${CONFIG.limit}&cursor=${cursor}&sort=new`;
-                const options = { headers: { 'Authorization': `Bearer ${token}` } };
-                const res = await fetch(url, options);
+            // Однопоточный скрапинг (optimized: reduced delay)
+            while (isRunning && emptyHits < CONFIG.maxEmpty && !currentSearch.cancelled) {
+                try {
+                    const cursor = encodeURIComponent(currentDate.toISOString());
+                    const url = `https://xn--d1ah4a.com/api/posts/user/${USERNAME}?limit=${CONFIG.limit}&cursor=${cursor}&sort=new`;
+                    const options = { headers: { 'Authorization': `Bearer ${token}` } };
+                    const res = await fetch(url, options);
 
-                if (res.status === 401) {
-                    token = await getNewToken();
-                    if (!token) break;
-                    continue;
-                }
-
-                const result = await res.json();
-                const posts = result.data?.posts || [];
-
-                if (posts.length > 0) {
-                    for (let i = 0; i < posts.length; i++) {
-                        allPosts.set(posts[i].id, posts[i]);
+                    if (res.status === 401) {
+                        token = await getNewToken();
+                        if (!token) break;
+                        continue;
                     }
-                    emptyHits = 0;
-                    // Двигаемся в сторону устаревания: вычитаем 1 день
-                    currentDate.setDate(currentDate.getDate() - 1);
-                } else {
+
+                    const result = await res.json();
+
+                    const posts = result.data?.posts || [];
+
+                    if (posts.length > 0) {
+                        for (let i = 0; i < posts.length; i++) {
+                            allPosts.set(posts[i].id, posts[i]);
+                        }
+                        emptyHits = 0;
+                        // Двигаемся в сторону устаревания: вычитаем 1 день
+                        currentDate.setDate(currentDate.getDate() - 1);
+                    } else {
+                        emptyHits++;
+                    }
+
+                    if (posts.length < CONFIG.limit) break;
+
+                } catch (e) {
+                    console.error('Ошибка при скрапинге:', e);
                     emptyHits++;
+                    await new Promise(r => setTimeout(r, 200)); // Reduced delay
                 }
-
-                if (posts.length < CONFIG.limit) break;
-
-            } catch (e) {
-                console.error('Ошибка при скрапинге:', e);
-                emptyHits++;
-                await new Promise(r => setTimeout(r, 500));
             }
-        }
 
-        isRunning = false;
+            if (currentSearch.cancelled) {
+                if (hideNewPostsObserver) {
+                    hideNewPostsObserver.disconnect();
+                    hideNewPostsObserver = null;
+                }
+                return;
+            }
+
+            isRunning = false;
+            postsCache = new Map(allPosts); // Cache the posts
+            cacheLoaded = true;
+        }
 
         const finalData = Array.from(allPosts.values());
 
-        // Фильтрация по запросу
+        // Фильтрация по запросу (optimized: use includes for speed)
         let filteredData = finalData.filter(post => {
             const content = (post.content || post.text || '').toLowerCase();
             return content.includes(query);
@@ -147,48 +199,111 @@
         // Создаём Set с id отфильтрованных постов
         const filteredIds = new Set(filteredData.map(post => post.id));
 
-        // Находим все div с классом post-container и фильтруем по data-post-id
-        postContainers.forEach(container => {
-            const postId = container.getAttribute('data-post-id');
-            if (postId && filteredIds.has(postId)) {
-                container.style.display = ''; // Показать
+        // Теперь ждём, пока все filteredIds появятся на странице, провоцируя загрузку путём движения sentinel
+        function checkAllPostsLoaded() {
+            if (!currentSearch || currentSearch.cancelled) {
+                if (hideNewPostsObserver) {
+                    hideNewPostsObserver.disconnect();
+                    hideNewPostsObserver = null;
+                }
+                return;
+            }
+
+            const currentPostContainers = document.querySelectorAll('[class*="post-container"]');
+            const currentIds = new Set();
+            currentPostContainers.forEach(container => {
+                const postId = container.getAttribute('data-post-id');
+                if (postId) currentIds.add(postId);
+            });
+
+            // Проверяем, все ли filteredIds присутствуют
+            const allLoaded = Array.from(filteredIds).every(id => currentIds.has(id));
+
+            if (allLoaded) {
+                // Все посты загружены, завершаем поиск
+                completeSearch(filteredIds);
             } else {
-                container.style.display = 'none'; // Скрыть
-            }
-        });
-
-        // Находим блок post-list и добавляем/убираем надпись "посты не найдены" или spinner
-        if (postList) {
-            // Убираем spinner
-            const existingSpinner = postList.querySelector('.search-spinner');
-            if (existingSpinner) {
-                existingSpinner.remove();
-            }
-
-            // Убираем существующую надпись, если есть
-            const existingMessage = postList.querySelector('.no-posts-message');
-            if (existingMessage) {
-                existingMessage.remove();
-            }
-
-            if (filteredData.length === 0) {
-                // Добавляем надпись "посты не найдены"
-                const noPostsMessage = document.createElement('div');
-                noPostsMessage.className = 'no-posts-message';
-                noPostsMessage.textContent = 'посты не найдены';
-                noPostsMessage.style.cssText = `
-                    text-align: center;
-                    padding: 20px;
-                    font-size: 18px;
-                    color: #666;
-                `;
-                postList.appendChild(noPostsMessage);
+                // Провоцируем загрузку новых постов путём движения sentinel элемента (optimized: faster movement)
+                const sentinel = document.querySelector('[class*="post-list__sentinel"]');
+                if (sentinel) {
+                    const originalPosition = sentinel.style.position || '';
+                    const originalTop = sentinel.style.top || '';
+                    sentinel.style.position = 'relative';
+                    sentinel.style.top = '-500px'; // Move out of viewport to trigger intersection
+                    setTimeout(() => {
+                        sentinel.style.top = originalTop; // Move back immediately
+                        sentinel.style.position = originalPosition;
+                    }, 1); // Reduced timeout
+                }
+                // Продолжаем ждать, проверяем снова через меньшее время
+                setTimeout(checkAllPostsLoaded, 10); // Reduced delay to 10ms
             }
         }
 
-        // Извлекаем id и content, сохраняем в формате id:content
-        const postsData = filteredData.map(post => `${post.id}:${post.content || post.text || 'Нет содержимого'}`);
-        console.log(`Отфильтрованные посты по запросу "${query}":`, postsData);
+        function completeSearch(filteredIds) {
+            if (!currentSearch || currentSearch.cancelled) {
+                if (hideNewPostsObserver) {
+                    hideNewPostsObserver.disconnect();
+                    hideNewPostsObserver = null;
+                }
+                return;
+            }
+
+            // Disconnect the observer
+            if (hideNewPostsObserver) {
+                hideNewPostsObserver.disconnect();
+                hideNewPostsObserver = null;
+            }
+
+            // Находим все div с классом post-container и фильтруем по data-post-id
+            const postContainers = document.querySelectorAll('[class*="post-container"]');
+            postContainers.forEach(container => {
+                const postId = container.getAttribute('data-post-id');
+                if (postId && filteredIds.has(postId)) {
+                    container.style.display = ''; // Показать
+                } else {
+                    container.style.display = 'none'; // Скрыть
+                }
+            });
+
+            // Находим блок post-list и добавляем/убираем надпись "посты не найдены" или spinner
+            if (postList) {
+                // Убираем spinner
+                const existingSpinner = postList.querySelector('.search-spinner');
+                if (existingSpinner) {
+                    existingSpinner.remove();
+                }
+
+                // Убираем существующую надпись, если есть
+                const existingMessage = postList.querySelector('.no-posts-message');
+                if (existingMessage) {
+                    existingMessage.remove();
+                }
+
+                if (filteredData.length === 0) {
+                    // Добавляем надпись "посты не найдены"
+                    const noPostsMessage = document.createElement('div');
+                    noPostsMessage.className = 'no-posts-message';
+                    noPostsMessage.textContent = 'посты не найдены';
+                    noPostsMessage.style.cssText = `
+                        text-align: center;
+                        padding: 20px;
+                        font-size: 18px;
+                        color: #666;
+                    `;
+                    postList.appendChild(noPostsMessage);
+                }
+            }
+
+            // Извлекаем id и content, сохраняем в формате id:content
+            const postsData = filteredData.map(post => `${post.id}:${post.content || post.text || 'Нет содержимого'}`);
+            console.log(`Отфильтрованные посты по запросу "${query}":`, postsData);
+
+            currentSearch = null;
+        }
+
+        // Начинаем проверку
+        checkAllPostsLoaded();
     }
 
     async function addSearchBar() {
@@ -245,12 +360,12 @@
             color: #666; /* Icon color */
         `;
 
-        // Create the clear button (circular, transparent background, at the end, slightly moved left)
+        // Create the clear button (circular, transparent background, at the end, moved further left)
         const clearButton = document.createElement('button');
         clearButton.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" height="24px" viewBox="0 -960 960 960" width="24px" fill="#1f1f1f"><path d="m456-320 104-104 104 104 56-56-104-104 104-104-56-56-104 104-104-104-56 56 104 104-104 104 56 56Zm-96 160q-19 0-36-8.5T296-192L80-480l216-288q11-15 28-23.5t36-8.5h440q33 0 56.5 23.5T880-720v480q0 33-23.5 56.5T800-160H360ZM180-480l180 240h440v-480H360L180-480Zm400 0Z"/></svg>';
         clearButton.style.cssText = `
             position: absolute;
-            right: 15px; /* Slightly moved left */
+            right: 0px; /* Moved further left */
             top: 50%;
             transform: translateY(-50%);
             width: 30px;
@@ -270,7 +385,7 @@
             searchInput.dispatchEvent(new Event('input')); // Trigger the input event to perform search
         });
 
-        // Debounce timer for automatic search
+        // Debounce timer for automatic search (optimized: reduced debounce)
         let debounceTimer;
 
         // Add event listener for automatic search on input change with debounce
@@ -278,7 +393,7 @@
             clearTimeout(debounceTimer);
             debounceTimer = setTimeout(async () => {
                 await scrapePosts(searchInput.value);
-            }, 300); // 300ms debounce
+            }, 150); // Reduced debounce
         });
 
         // Optional: Keep Enter key for immediate search
